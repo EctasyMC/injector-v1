@@ -6,7 +6,7 @@
 
     <groupId>lol.nikko.ectasyinjector</groupId>
     <artifactId>ectasyinjector</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 
     <properties>
         <maven.compiler.source>8</maven.compiler.source>
@@ -25,7 +25,7 @@
         <dependency>
             <groupId>lol.nikko.asmutil</groupId>
             <artifactId>ASMUtil</artifactId>
-            <version>1.2.1</version>
+            <version>1.2.3</version>
         </dependency>
         <dependency>
             <groupId>net.sourceforge.argparse4j</groupId>
